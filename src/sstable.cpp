@@ -67,17 +67,43 @@ void sync_directory(const std::filesystem::path& directory) {
     ::close(descriptor);
 }
 
+void read_exact_at(int descriptor, std::span<std::byte> output, std::uint64_t offset) {
+    if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
+        throw std::runtime_error("SSTable offset exceeds platform limit");
+    }
+    std::size_t completed = 0;
+    while (completed < output.size()) {
+        const auto result = ::pread(
+            descriptor,
+            output.data() + completed,
+            output.size() - completed,
+            static_cast<off_t>(offset + completed));
+        if (result < 0) {
+            if (errno == EINTR) continue;
+            throw std::system_error(errno, std::generic_category(), "unable to read SSTable");
+        }
+        if (result == 0) throw std::runtime_error("truncated SSTable record");
+        completed += static_cast<std::size_t>(result);
+    }
+}
+
 }  // namespace
 
 SSTable::SSTable(
     std::filesystem::path path,
     BloomFilter filter,
     std::vector<IndexEntry> index,
-    std::uint64_t max_sequence)
+    std::uint64_t max_sequence,
+    int descriptor)
     : path_(std::move(path)),
       filter_(std::move(filter)),
       index_(std::move(index)),
-      max_sequence_(max_sequence) {}
+      max_sequence_(max_sequence),
+      descriptor_(descriptor) {}
+
+SSTable::~SSTable() {
+    if (descriptor_ >= 0) ::close(descriptor_);
+}
 
 std::shared_ptr<SSTable> SSTable::create(
     const std::filesystem::path& final_path,
@@ -179,7 +205,17 @@ std::shared_ptr<SSTable> SSTable::open(const std::filesystem::path& path) {
         throw std::runtime_error("unexpected trailing bytes in SSTable");
     }
     if (observed_max_sequence != max_sequence) throw std::runtime_error("invalid SSTable sequence metadata");
-    return std::shared_ptr<SSTable>(new SSTable(path, std::move(filter), std::move(index), max_sequence));
+    const int descriptor = ::open(path.c_str(), O_RDONLY);
+    if (descriptor < 0) {
+        throw std::system_error(errno, std::generic_category(), "unable to open SSTable descriptor");
+    }
+    try {
+        return std::shared_ptr<SSTable>(
+            new SSTable(path, std::move(filter), std::move(index), max_sequence, descriptor));
+    } catch (...) {
+        ::close(descriptor);
+        throw;
+    }
 }
 
 std::optional<Entry> SSTable::get(std::string_view key) const {
@@ -192,23 +228,57 @@ std::optional<Entry> SSTable::get(std::string_view key) const {
 }
 
 std::vector<Entry> SSTable::entries() const {
+    return scan("");
+}
+
+std::vector<Entry> SSTable::scan(
+    std::string_view start_inclusive,
+    std::string_view end_exclusive,
+    std::size_t limit) const {
     std::vector<Entry> result;
-    result.reserve(index_.size());
-    for (const auto& item : index_) result.push_back(read_entry(item.offset));
+    if (limit == 0 || (!end_exclusive.empty() && start_inclusive >= end_exclusive)) return result;
+    const auto first = std::lower_bound(
+        index_.begin(), index_.end(), start_inclusive,
+        [](const IndexEntry& item, std::string_view key) { return item.key < key; });
+    result.reserve(std::min<std::size_t>(limit, static_cast<std::size_t>(index_.end() - first)));
+    for (auto item = first; item != index_.end() && result.size() < limit; ++item) {
+        if (!end_exclusive.empty() && item->key >= end_exclusive) break;
+        result.push_back(read_entry(item->offset));
+    }
     return result;
 }
 
 Entry SSTable::read_entry(std::uint64_t offset) const {
-    std::ifstream input(path_, std::ios::binary);
-    if (!input) throw std::runtime_error("unable to open SSTable record");
-    input.seekg(static_cast<std::streamoff>(offset));
-    if (!input) throw std::runtime_error("unable to seek to SSTable record");
-    const auto payload_size = read_integer<std::uint32_t>(input);
+    std::array<std::byte, sizeof(std::uint32_t)> size_bytes{};
+    read_exact_at(descriptor_, size_bytes, offset);
+    std::size_t size_offset = 0;
+    const auto payload_size = codec::read_integer<std::uint32_t>(size_bytes, size_offset);
     if (payload_size > kMaximumRecordBytes) throw std::runtime_error("SSTable record is too large");
-    const auto payload = read_bytes(input, payload_size);
-    const auto stored_checksum = read_integer<std::uint32_t>(input);
+    std::vector<std::byte> payload(payload_size);
+    read_exact_at(descriptor_, payload, offset + sizeof(std::uint32_t));
+    std::array<std::byte, sizeof(std::uint32_t)> checksum_bytes{};
+    read_exact_at(
+        descriptor_, checksum_bytes, offset + sizeof(std::uint32_t) + payload_size);
+    std::size_t checksum_offset = 0;
+    const auto stored_checksum = codec::read_integer<std::uint32_t>(checksum_bytes, checksum_offset);
     if (crc32(payload) != stored_checksum) throw std::runtime_error("SSTable checksum mismatch");
     return codec::decode_entry(payload);
+}
+
+std::size_t SSTable::lower_bound_index(std::string_view key) const {
+    return static_cast<std::size_t>(std::lower_bound(
+        index_.begin(), index_.end(), key,
+        [](const IndexEntry& item, std::string_view wanted) { return item.key < wanted; }) - index_.begin());
+}
+
+const std::string& SSTable::key_at(std::size_t index) const {
+    if (index >= index_.size()) throw std::out_of_range("SSTable index is out of range");
+    return index_[index].key;
+}
+
+Entry SSTable::entry_at(std::size_t index) const {
+    if (index >= index_.size()) throw std::out_of_range("SSTable index is out of range");
+    return read_entry(index_[index].offset);
 }
 
 }  // namespace chronicle

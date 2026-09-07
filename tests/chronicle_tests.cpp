@@ -121,6 +121,21 @@ void wal_recovers_complete_records_and_ignores_torn_tail() {
         rejected = true;
     }
     REQUIRE(rejected);
+
+    const auto batch_path = directory.path() / "batch.log";
+    {
+        chronicle::WriteAheadLog wal(batch_path, false);
+        const std::vector<chronicle::Entry> batch{
+            {1, false, "one", "1"},
+            {2, false, "two", "2"},
+            {3, true, "three", ""},
+        };
+        wal.append_batch(batch);
+    }
+    const auto batch_size = std::filesystem::file_size(batch_path);
+    std::filesystem::resize_file(batch_path, batch_size - 2);
+    chronicle::WriteAheadLog torn_batch(batch_path, false);
+    REQUIRE(torn_batch.replay().empty());
 }
 
 void sstable_round_trips_and_detects_corruption() {
@@ -187,6 +202,74 @@ void database_recovers_unflushed_wal() {
     REQUIRE(recovered.stats().sequence == 3);
 }
 
+void write_batches_are_atomic_and_recoverable() {
+    TemporaryDirectory directory;
+    {
+        chronicle::Database database(directory.path(), fast_options(100));
+        database.put("removed", "old");
+        database.write_batch({
+            {"alpha", "one"},
+            {"beta", "two"},
+            {"removed", std::nullopt},
+            {"alpha", "newest"},
+        });
+        bool rejected = false;
+        try {
+            database.write_batch({{"should-not-appear", "value"}, {"", "invalid"}});
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        REQUIRE(rejected);
+        REQUIRE(!database.get("should-not-appear"));
+        REQUIRE(database.stats().writes == 5);
+    }
+    chronicle::Database recovered(directory.path(), fast_options(100));
+    REQUIRE(recovered.get("alpha") == "newest");
+    REQUIRE(recovered.get("beta") == "two");
+    REQUIRE(!recovered.get("removed"));
+}
+
+void range_and_prefix_scans_merge_all_levels() {
+    TemporaryDirectory directory;
+    chronicle::Database database(directory.path(), fast_options(2, 5));
+    database.put("apple", "v1");
+    database.put("apricot", "ripe");
+    database.put("apple", "v2");
+    database.erase("apricot");
+    database.put("banana", "yellow");
+    database.put("blueberry", "blue");
+    database.put("carrot", "orange");
+
+    const auto range = database.scan("a", "c");
+    REQUIRE(range.size() == 3);
+    REQUIRE(range[0].key == "apple" && range[0].value == "v2");
+    REQUIRE(range[1].key == "banana" && range[1].value == "yellow");
+    REQUIRE(range[2].key == "blueberry" && range[2].value == "blue");
+
+    const auto prefix = database.scan_prefix("ap");
+    REQUIRE(prefix.size() == 1);
+    REQUIRE(prefix.front().key == "apple");
+    REQUIRE(database.scan("", {}, 2).size() == 2);
+    REQUIRE(database.scan("z", "a").empty());
+    const auto stats = database.stats();
+    REQUIRE(stats.range_scans == 4);
+    REQUIRE(stats.range_entries_returned == 6);
+
+    TemporaryDirectory tombstone_directory;
+    chronicle::Database tombstone_database(tombstone_directory.path(), fast_options(100, 5));
+    for (int index = 0; index < 20; ++index) {
+        tombstone_database.put("key-" + std::to_string(index), "visible");
+    }
+    tombstone_database.flush();
+    for (int index = 0; index < 10; ++index) {
+        tombstone_database.erase("key-" + std::to_string(index));
+    }
+    tombstone_database.flush();
+    const auto after_tombstones = tombstone_database.scan("", {}, 5);
+    REQUIRE(after_tombstones.size() == 5);
+    REQUIRE(after_tombstones.front().key == "key-10");
+}
+
 void flush_compaction_and_restart_preserve_latest_state() {
     TemporaryDirectory directory;
     {
@@ -235,6 +318,14 @@ void randomized_workload_matches_reference_model() {
         REQUIRE((expected == model.end() && !actual) ||
                 (expected != model.end() && actual && *actual == expected->second));
     }
+    const auto visible = recovered.scan("");
+    REQUIRE(visible.size() == model.size());
+    std::size_t position = 0;
+    for (const auto& [key, value] : model) {
+        REQUIRE(visible[position].key == key);
+        REQUIRE(visible[position].value == value);
+        ++position;
+    }
 }
 
 void concurrent_writers_do_not_lose_updates() {
@@ -270,6 +361,8 @@ int main() {
         {"SSTable round trip and checksums", sstable_round_trips_and_detects_corruption},
         {"database CRUD and validation", database_supports_crud_and_validation},
         {"database WAL recovery", database_recovers_unflushed_wal},
+        {"atomic write batches", write_batches_are_atomic_and_recoverable},
+        {"range and prefix scans", range_and_prefix_scans_merge_all_levels},
         {"flush, compaction, and restart", flush_compaction_and_restart_preserve_latest_state},
         {"randomized reference-model workload", randomized_workload_matches_reference_model},
         {"concurrent writers", concurrent_writers_do_not_lose_updates},

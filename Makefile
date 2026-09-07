@@ -8,7 +8,7 @@ LIB_OBJECTS := $(LIB_SOURCES:%.cpp=$(BUILD)/%.o)
 .DEFAULT_GOAL := all
 .PHONY: all test benchmark sanitize clean
 
-all: $(BUILD)/chronicle_cli $(BUILD)/chronicle_tests
+all: $(BUILD)/chronicle_cli $(BUILD)/chronicle_tests $(BUILD)/chronicle_example
 
 $(BUILD)/src/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
@@ -18,6 +18,9 @@ $(BUILD)/chronicle_cli: $(LIB_OBJECTS) src/cli.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
 
 $(BUILD)/chronicle_tests: $(LIB_OBJECTS) tests/chronicle_tests.cpp
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
+
+$(BUILD)/chronicle_example: $(LIB_OBJECTS) examples/atomic_batch.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
 
 $(BUILD)/chronicle_benchmark: $(LIB_OBJECTS) benchmarks/benchmark.cpp

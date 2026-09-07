@@ -26,6 +26,10 @@ add_executable(chronicle_cli src/cli.cpp)
 target_link_libraries(chronicle_cli PRIVATE chronicle)
 target_compile_options(chronicle_cli PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
+add_executable(chronicle_example examples/atomic_batch.cpp)
+target_link_libraries(chronicle_example PRIVATE chronicle)
+target_compile_options(chronicle_example PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 add_executable(chronicle_tests tests/chronicle_tests.cpp)
 target_link_libraries(chronicle_tests PRIVATE chronicle)
 target_compile_options(chronicle_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

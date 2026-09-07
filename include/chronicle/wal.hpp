@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <span>
 #include <vector>
 
 #include "chronicle/entry.hpp"
@@ -15,6 +16,7 @@ public:
     WriteAheadLog& operator=(const WriteAheadLog&) = delete;
 
     void append(const Entry& entry);
+    void append_batch(std::span<const Entry> entries);
     [[nodiscard]] std::vector<Entry> replay() const;
     void reset();
 

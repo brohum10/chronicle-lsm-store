@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -32,6 +33,20 @@ struct Stats {
     std::uint64_t writes{};
     std::uint64_t reads{};
     std::uint64_t bloom_filter_negatives{};
+    std::uint64_t flushes{};
+    std::uint64_t compactions{};
+    std::uint64_t range_scans{};
+    std::uint64_t range_entries_returned{};
+};
+
+struct Mutation {
+    std::string key;
+    std::optional<std::string> value;
+};
+
+struct KeyValue {
+    std::string key;
+    std::string value;
 };
 
 class Database {
@@ -43,7 +58,15 @@ public:
 
     void put(std::string key, std::string value);
     void erase(std::string key);
+    void write_batch(std::vector<Mutation> mutations);
     [[nodiscard]] std::optional<std::string> get(std::string_view key) const;
+    [[nodiscard]] std::vector<KeyValue> scan(
+        std::string_view start_inclusive,
+        std::string_view end_exclusive = {},
+        std::size_t limit = std::numeric_limits<std::size_t>::max()) const;
+    [[nodiscard]] std::vector<KeyValue> scan_prefix(
+        std::string_view prefix,
+        std::size_t limit = std::numeric_limits<std::size_t>::max()) const;
     void flush();
     void compact();
     [[nodiscard]] Stats stats() const;
@@ -54,6 +77,11 @@ private:
     void flush_locked();
     void compact_locked();
     void load_tables();
+    [[nodiscard]] std::vector<KeyValue> scan_locked(
+        std::string_view start_inclusive,
+        std::string_view end_exclusive,
+        std::size_t limit,
+        std::string_view required_prefix = {}) const;
 
     std::filesystem::path directory_;
     Options options_;
@@ -66,6 +94,10 @@ private:
     mutable std::atomic<std::uint64_t> writes_{};
     mutable std::atomic<std::uint64_t> reads_{};
     mutable std::atomic<std::uint64_t> bloom_filter_negatives_{};
+    mutable std::atomic<std::uint64_t> flushes_{};
+    mutable std::atomic<std::uint64_t> compactions_{};
+    mutable std::atomic<std::uint64_t> range_scans_{};
+    mutable std::atomic<std::uint64_t> range_entries_returned_{};
 };
 
 }  // namespace chronicle

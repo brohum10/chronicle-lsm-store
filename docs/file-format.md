@@ -11,15 +11,22 @@ self-delimiting and allow recovery to reject torn or corrupted data.
 +------------------+----------------------+------------------+
 ```
 
-The mutation payload is:
+Each WAL payload is one atomic batch:
+
+```text
+record type u8 | entry count u32 | (entry bytes u32 | mutation payload)...
+```
+
+Each mutation payload is:
 
 ```text
 tombstone u8 | sequence u64 | key bytes u32 | value bytes u32 | key | value
 ```
 
 Recovery processes records in order. It ignores an incomplete final record, which can result from a
-power loss during an append. Oversized, malformed, or checksum-invalid complete records fail loudly
-so corruption is not mistaken for an ordinary torn write.
+power loss during an append. Because an entire batch shares one checksum envelope, recovery applies
+either every mutation in that batch or none of them. Oversized, malformed, or checksum-invalid
+complete records fail loudly so corruption is not mistaken for an ordinary torn write.
 
 ## SSTable
 

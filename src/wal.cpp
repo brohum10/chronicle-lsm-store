@@ -1,5 +1,6 @@
 #include "chronicle/wal.hpp"
 
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -15,7 +16,8 @@
 namespace chronicle {
 namespace {
 
-constexpr std::uint32_t kMaximumRecordBytes = 8U * 1024U * 1024U;
+constexpr std::uint32_t kMaximumRecordBytes = 64U * 1024U * 1024U;
+constexpr std::uint8_t kBatchRecord = 1;
 
 void write_all(int descriptor, std::span<const std::byte> bytes) {
     std::size_t written = 0;
@@ -56,7 +58,21 @@ WriteAheadLog::~WriteAheadLog() {
 }
 
 void WriteAheadLog::append(const Entry& entry) {
-    const auto payload = codec::encode_entry(entry);
+    append_batch(std::span<const Entry>(&entry, 1));
+}
+
+void WriteAheadLog::append_batch(std::span<const Entry> entries) {
+    if (entries.empty()) return;
+    if (entries.size() > UINT32_MAX) throw std::length_error("WAL batch has too many entries");
+    std::vector<std::byte> payload;
+    codec::append_integer<std::uint8_t>(payload, kBatchRecord);
+    codec::append_integer<std::uint32_t>(payload, static_cast<std::uint32_t>(entries.size()));
+    for (const auto& entry : entries) {
+        const auto encoded = codec::encode_entry(entry);
+        codec::append_integer<std::uint32_t>(payload, static_cast<std::uint32_t>(encoded.size()));
+        payload.insert(payload.end(), encoded.begin(), encoded.end());
+        if (payload.size() > kMaximumRecordBytes) throw std::length_error("WAL batch is too large");
+    }
     std::vector<std::byte> record;
     record.reserve(sizeof(std::uint32_t) + payload.size() + sizeof(std::uint32_t));
     codec::append_integer<std::uint32_t>(record, static_cast<std::uint32_t>(payload.size()));
@@ -83,7 +99,20 @@ std::vector<Entry> WriteAheadLog::replay() const {
         cursor += payload_size;
         const auto stored_checksum = codec::read_integer<std::uint32_t>(bytes, cursor);
         if (crc32(payload) != stored_checksum) throw std::runtime_error("WAL checksum mismatch");
-        entries.push_back(codec::decode_entry(payload));
+        std::size_t payload_offset = 0;
+        if (codec::read_integer<std::uint8_t>(payload, payload_offset) != kBatchRecord) {
+            throw std::runtime_error("unsupported WAL record type");
+        }
+        const auto entry_count = codec::read_integer<std::uint32_t>(payload, payload_offset);
+        for (std::uint32_t item = 0; item < entry_count; ++item) {
+            const auto entry_size = codec::read_integer<std::uint32_t>(payload, payload_offset);
+            if (entry_size > payload.size() - std::min(payload.size(), payload_offset)) {
+                throw std::runtime_error("invalid WAL batch entry length");
+            }
+            entries.push_back(codec::decode_entry(payload.subspan(payload_offset, entry_size)));
+            payload_offset += entry_size;
+        }
+        if (payload_offset != payload.size()) throw std::runtime_error("trailing bytes in WAL batch");
         offset = cursor;
     }
     return entries;

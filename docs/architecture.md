@@ -5,7 +5,7 @@ read-path tradeoffs of a storage engine visible. It deliberately uses the C++ st
 small POSIX durability primitives instead of hiding the core ideas behind a database dependency.
 
 ```text
-put / delete
+put / delete / atomic batch
       |
       v
 +-------------------+       append + optional fsync
@@ -19,15 +19,15 @@ put / delete
 +-------------------+                         +------+------------+
       ^                                              |
       | newest value                                 | merge
-get --+---------------- scan newest to oldest -------+
+get / range --+------------ merge newest versions ---+
                                                      v
                                               compacted SSTable
 ```
 
 ## Write path
 
-1. `Database` validates key and value limits and assigns a monotonic sequence number.
-2. The complete mutation is appended to the write-ahead log. With the default configuration,
+1. `Database` validates every mutation before assigning monotonic sequence numbers.
+2. The complete mutation or atomic batch is appended to the write-ahead log. With the default configuration,
    `fsync` completes before the call can succeed.
 3. The mutation enters a probabilistic skip list, giving expected `O(log n)` insert and lookup.
 4. At the configured size threshold, the already-sorted memtable is written to a temporary SSTable.
@@ -43,9 +43,14 @@ Reads first check the memtable. Chronicle then checks SSTables from newest to ol
 a Bloom filter, so keys that are definitely absent avoid a binary search and disk read. A matching
 tombstone stops the search and returns `not found`, preventing an older value from resurfacing.
 
-The current implementation keeps a sparse key-to-offset index in memory and opens the table for a
-point read. This keeps ownership and corruption handling straightforward. A block cache and shared
-file handles would be natural next steps for a long-running, read-heavy process.
+Ordered range and prefix reads use a min-heap to perform a k-way merge across the sorted memtable and
+the relevant slice of every SSTable. When the same key exists in several levels, its greatest sequence
+number wins; tombstones are filtered only after version resolution. With `k` sources and `n` visited
+entries, merge work is `O(n log k)`.
+
+The current implementation keeps a key-to-offset index in memory and owns one descriptor per open
+table. Point and range reads use `pread`, so independent readers do not share or lock a mutable file
+cursor. A bounded block cache would be a natural next step for a long-running, read-heavy process.
 
 ## Recovery
 
@@ -68,7 +73,8 @@ made durable before obsolete inputs are deleted.
 
 ## Concurrency model
 
-`Database` uses a `std::shared_mutex`: independent readers can proceed together, while mutations,
-flushes, and compactions take exclusive ownership. Atomic counters track read, write, and Bloom-filter
-activity without expanding the critical section. Chronicle is thread-safe within one process; it does
-not claim multi-process writer coordination.
+`Database` uses a `std::shared_mutex`: independent point/range readers can proceed together, while
+mutations, atomic batches, flushes, and compactions take exclusive ownership. Atomic counters track
+reads, writes, Bloom-filter rejections, flushes, compactions, scans, and returned range rows without
+expanding the critical section. Chronicle is thread-safe within one process; it does not claim
+multi-process writer coordination.
