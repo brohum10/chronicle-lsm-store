@@ -280,7 +280,7 @@ void Database::load_tables() {
         std::smatch match;
         const auto filename = item.path().filename().string();
         if (!std::regex_match(filename, match, table_pattern)) continue;
-        const auto identifier = std::stoull(match[1].str());
+        const auto identifier = static_cast<std::uint64_t>(std::stoull(match[1].str()));
         discovered.emplace_back(identifier, item.path());
         next_table_id_ = std::max(next_table_id_, identifier + 1);
     }

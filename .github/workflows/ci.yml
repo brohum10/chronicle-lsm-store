@@ -15,7 +15,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
@@ -26,7 +26,7 @@ jobs:
   sanitizers:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure with ASan and UBSan
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCHRONICLE_SANITIZERS=ON
       - name: Build
