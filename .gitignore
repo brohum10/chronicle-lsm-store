@@ -1,0 +1,6 @@
+/build/
+/build-sanitize/
+/.cache/
+/.DS_Store
+*.dSYM/
+compile_commands.json
